@@ -127,7 +127,22 @@ button:focus-visible { outline: 2px solid var(--warm); outline-offset: 2px; }
 /* ---------- комнаты и плитки ---------- */
 
 .rooms { display: grid; gap: 22px; }
-.room-head { display: flex; align-items: baseline; justify-content: space-between; margin: 0 2px 10px; }
+.room-head { display: flex; align-items: baseline; justify-content: space-between; margin: 0 2px 10px; position: relative; }
+/* Свайп по названию комнаты: вправо — весь свет включить, влево — выключить. */
+.room-head.pullable { touch-action: pan-y; cursor: grab; user-select: none; }
+.room-head.pullable > :not(.room-pull) { transform: translateX(var(--pull, 0)); transition: transform 0.2s; }
+.room-head.dragging > :not(.room-pull) { transition: none; }
+.room-pull {
+  position: absolute; left: 0; top: 50%; translate: 0 -50%;
+  width: 30px; height: 30px; border-radius: 50%;
+  display: grid; place-items: center;
+  color: var(--muted); background: var(--card);
+  opacity: 0; transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+.room-head.dragging .room-pull { opacity: 1; }
+.room-head.arm-on .room-pull { background: var(--warm); color: #1a1408; }
+.room-head.to-left .room-pull { left: auto; right: 0; }
+.room-head.arm-off .room-pull { background: var(--card-2); color: var(--text); }
 .room-name { font-size: 17px; font-weight: 600; display: inline-flex; align-items: center; gap: 8px; }
 .room-temp { color: var(--muted); font-size: 17px; font-variant-numeric: tabular-nums; }
 .here { width: 7px; height: 7px; border-radius: 50%; background: var(--warm); box-shadow: 0 0 0 4px var(--warm-bg); }
@@ -175,6 +190,9 @@ button:focus-visible { outline: 2px solid var(--warm); outline-offset: 2px; }
   transition: transform 0.15s;
 }
 .tile.dragging .tile-fill { transition: none; }
+/* Первый запуск: регулируемые плитки один раз «проводят» заливкой — подсказка без слов. */
+.hint .tile.adj .tile-fill { animation: hint 1.6s ease-in-out 0.6s 1; }
+@keyframes hint { 0%, 100% { transform: scaleX(var(--level, 0)); } 45% { transform: scaleX(1); } 70% { transform: scaleX(0.15); } }
 
 .tile.on { background: var(--warm-bg); }
 .tile.on .tile-icon { color: var(--warm); }

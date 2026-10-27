@@ -160,9 +160,11 @@ function renderRooms() {
       const issues = list.map(issue).filter(Boolean);
       if (!tiles.length && !issues.length) return '';
       const here = list.some((d) => d.kind === 'presence' && d.state.presence);
+      const lights = list.some((d) => ROOM_LIGHTS[d.kind]);
       return `
         <article class="room">
-          <div class="room-head">
+          <div class="room-head${lights ? ' pullable' : ''}" ${lights ? `data-room="${room.id}"` : ''}>
+            ${lights ? `<span class="room-pull" aria-hidden="true">${icon('light', 18)}</span>` : ''}
             <span class="room-name">${esc(room.name)}${here ? '<i class="here"></i>' : ''}</span>
             <span class="room-temp">${roomTemp(list)}</span>
           </div>
@@ -171,10 +173,21 @@ function renderRooms() {
         </article>`;
     })
     .join('');
+  showHintOnce();
   for (const img of $('rooms').querySelectorAll('img[data-cam]')) {
     const url = frames.get(img.dataset.cam);
     if (url) img.src = url;
   }
+}
+
+// Подсказка жеста без слов: при первом запуске регулируемые плитки один раз «проводят» заливкой.
+let hinted = false;
+function showHintOnce() {
+  if (hinted || !$('rooms').querySelector('.tile.adj')) return;
+  hinted = true;
+  try { if (localStorage.getItem('dom:hint') === '1') return; localStorage.setItem('dom:hint', '1'); } catch { return; }
+  $('rooms').classList.add('hint');
+  setTimeout(() => $('rooms').classList.remove('hint'), 2600);
 }
 
 function roomTemp(list) {
@@ -293,12 +306,34 @@ function tap(d) {
 }
 
 // Свайп: значение по горизонтали. Полная ширина плитки = весь диапазон (для температуры — 8°).
+// Выключенное устройство тоже можно «провести»: подсветка разгорается с нуля, климат включается.
+// live — подсветка меняется прямо под пальцем, остальное — когда палец отпущен.
 const RANGES = {
-  led: { key: 'brightness', min: 1, max: 100, step: 1, span: 100, read: (s) => s.brightness, show: (v) => `${v}%` },
-  curtain: { key: 'position', min: 0, max: 100, step: 5, span: 100, read: (s) => s.position, show: (v) => `${v}%` },
-  thermostat: { key: 'setpoint', min: 5, max: 30, step: 0.5, span: 8, read: (s) => s.setpoint ?? 20, show: deg },
-  ac: { key: 'setpoint', min: 16, max: 30, step: 1, span: 8, read: (s) => s.setpoint ?? 24, show: deg },
+  led: {
+    min: 0, max: 100, step: 1, span: 100, live: true,
+    read: (s) => (s.on ? s.brightness : 0),
+    show: (v) => (v ? `${v}%` : 'выкл'),
+    cmd: (v) => (v ? { on: true, brightness: v } : { on: false }),
+  },
+  curtain: {
+    min: 0, max: 100, step: 5, span: 100,
+    read: (s) => s.position, show: (v) => `${v}%`, cmd: (v) => ({ position: v }),
+  },
+  thermostat: {
+    min: 5, max: 30, step: 0.5, span: 8,
+    read: (s) => s.setpoint ?? 20, show: deg, cmd: (v) => ({ mode: 'heat', setpoint: v }),
+  },
+  ac: {
+    min: 16, max: 30, step: 1, span: 8,
+    read: (s) => s.setpoint ?? 24, show: deg, cmd: (v) => ({ on: true, setpoint: v }),
+  },
 };
+// Простые выключатели: провёл вправо — включил, влево — выключил.
+const FLICK = { light: true, switch: true, plug: true };
+const FLICK_PX = 36;
+// Весь свет комнаты — свайпом по её названию.
+const ROOM_LIGHTS = { light: true, led: true };
+const ROOM_PX = 70;
 
 // Долгое нажатие: редкие настройки.
 function details(d) {
@@ -357,15 +392,22 @@ const LED_PRESETS = [
   { name: 'Сирень', cmd: 'hue:280', css: '#a05cff' },
 ];
 
-// Жесты на плитках: касание, свайп, долгое нажатие — одним обработчиком.
+// Жесты: касание, свайп, долгое нажатие на плитке и свайп по названию комнаты — одним обработчиком.
 let gesture = null;
 $('rooms').addEventListener('pointerdown', (e) => {
+  if (e.button > 0) return;
+  const head = e.target.closest('.room-head.pullable');
+  if (head) {
+    gesture = { kind: 'room', el: head, room: head.dataset.room, x: e.clientX, y: e.clientY, mode: 'press' };
+    holding = true;
+    return;
+  }
   const el = e.target.closest('.tile');
-  if (!el || e.button > 0) return;
+  if (!el) return;
   const d = S.devices.get(el.dataset.id);
   if (!d || !d.online) return;
   const range = RANGES[d.kind];
-  gesture = { el, d, x: e.clientX, y: e.clientY, mode: 'press', range, start: range ? range.read(d.state) : 0, value: null };
+  gesture = { kind: 'tile', el, d, x: e.clientX, y: e.clientY, mode: 'press', range, start: range ? range.read(d.state) : 0, value: null, sent: 0 };
   holding = true;
   gesture.timer = setTimeout(() => {
     if (gesture?.mode !== 'press') return;
@@ -377,38 +419,76 @@ $('rooms').addEventListener('pointerdown', (e) => {
 
 window.addEventListener('pointermove', (e) => {
   if (!gesture) return;
-  const dx = e.clientX - gesture.x;
-  const dy = e.clientY - gesture.y;
-  if (gesture.mode === 'press') {
+  const g = gesture;
+  const dx = e.clientX - g.x;
+  const dy = e.clientY - g.y;
+  if (g.mode === 'press') {
     if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) return endGesture(); // это прокрутка страницы
-    if (Math.abs(dx) > 10 && gesture.range && gesture.d.state.on !== false) {
-      clearTimeout(gesture.timer);
-      gesture.mode = 'drag';
-      gesture.el.classList.add('dragging');
-      try { gesture.el.setPointerCapture(e.pointerId); } catch {}
+    if (Math.abs(dx) <= 10) return;
+    const can = g.kind === 'room' || g.range || FLICK[g.d.kind];
+    if (!can) return;
+    clearTimeout(g.timer);
+    g.mode = g.kind === 'room' ? 'room' : g.range ? 'drag' : 'flick';
+    g.el.classList.add('dragging');
+    try { g.el.setPointerCapture(e.pointerId); } catch {}
+  }
+  if (g.mode === 'drag') return dragValue(g, dx);
+  if (g.mode === 'flick') {
+    // Плитка тянется за пальцем и «защёлкивается», когда пройден порог.
+    const want = dx > FLICK_PX ? true : dx < -FLICK_PX ? false : null;
+    g.el.style.transform = `translateX(${Math.max(-18, Math.min(18, dx / 4))}px)`;
+    if (want !== g.value) {
+      g.value = want;
+      if (want != null) buzz();
+      g.el.classList.toggle('on', want ?? Boolean(g.d.state.on));
     }
   }
-  if (gesture.mode !== 'drag') return;
-  const r = gesture.range;
-  const width = gesture.el.getBoundingClientRect().width;
-  let v = gesture.start + (dx / width) * r.span;
-  v = Math.min(r.max, Math.max(r.min, Math.round(v / r.step) * r.step));
-  if (v !== gesture.value) {
-    gesture.value = v;
-    gesture.el.querySelector('.tile-value').textContent = r.show(v);
-    const fill = gesture.el.querySelector('.tile-fill');
-    if (fill) fill.style.setProperty('--level', (v - r.min) / (r.max - r.min));
+  if (g.mode === 'room') {
+    const want = dx > ROOM_PX ? true : dx < -ROOM_PX ? false : null;
+    g.el.style.setProperty('--pull', `${Math.max(-ROOM_PX - 20, Math.min(ROOM_PX + 20, dx))}px`);
+    g.el.classList.toggle('arm-on', want === true);
+    g.el.classList.toggle('arm-off', want === false);
+    g.el.classList.toggle('to-left', dx < 0);
+    if (want !== g.value && want != null) buzz();
+    g.value = want;
   }
 });
+
+function dragValue(g, dx) {
+  const r = g.range;
+  const width = g.el.getBoundingClientRect().width;
+  let v = g.start + (dx / width) * r.span;
+  v = Math.min(r.max, Math.max(r.min, Math.round(v / r.step) * r.step));
+  if (v === g.value) return;
+  g.value = v;
+  g.el.querySelector('.tile-value').textContent = r.show(v);
+  g.el.classList.add('adj');
+  g.el.classList.toggle('on', g.d.kind !== 'led' || v > 0);
+  let fill = g.el.querySelector('.tile-fill');
+  if (!fill) {
+    fill = document.createElement('span');
+    fill.className = 'tile-fill';
+    g.el.prepend(fill);
+  }
+  fill.style.setProperty('--level', (v - r.min) / (r.max - r.min));
+  // Подсветка отвечает сразу — не чаще раза в 250 мс, последнее значение уйдёт при отпускании.
+  if (r.live && Date.now() - g.sent > 250) {
+    g.sent = Date.now();
+    g.liveValue = v;
+    command(g.d.id, r.cmd(v));
+  }
+}
 
 window.addEventListener('pointerup', () => {
   if (!gesture) return;
   const g = gesture;
-  if (g.mode === 'press') tap(g.d);
-  if (g.mode === 'drag' && g.value != null && g.value !== g.start) {
+  if (g.kind === 'tile' && g.mode === 'press') tap(g.d);
+  if (g.mode === 'drag' && g.value != null && g.value !== g.start && g.value !== g.liveValue) {
     buzz();
-    command(g.d.id, { [g.range.key]: g.value });
+    command(g.d.id, g.range.cmd(g.value));
   }
+  if (g.mode === 'flick' && g.value != null && g.value !== Boolean(g.d.state.on)) command(g.d.id, { on: g.value });
+  if (g.mode === 'room' && g.value != null) roomLights(g.room, g.value);
   endGesture();
 });
 window.addEventListener('pointercancel', endGesture);
@@ -416,10 +496,20 @@ window.addEventListener('pointercancel', endGesture);
 function endGesture() {
   if (!gesture) return;
   clearTimeout(gesture.timer);
-  gesture.el.classList.remove('dragging');
+  const el = gesture.el;
+  el.classList.remove('dragging', 'arm-on', 'arm-off', 'to-left');
+  el.style.transform = '';
+  el.style.removeProperty('--pull');
   gesture = null;
   holding = false;
   if (roomsDirty) setTimeout(renderRooms, 250);
+}
+
+function roomLights(roomId, on) {
+  const list = [...S.devices.values()].filter((d) => d.room === roomId && ROOM_LIGHTS[d.kind] && d.online && Boolean(d.state.on) !== on);
+  for (const d of list) command(d.id, { on });
+  const name = S.house.rooms.find((r) => r.id === roomId)?.name ?? '';
+  toast(`${name}: свет ${on ? 'включён' : 'выключен'}`);
 }
 // Долгое нажатие не должно открывать системное меню.
 $('rooms').addEventListener('contextmenu', (e) => { if (e.target.closest('.tile')) e.preventDefault(); });
