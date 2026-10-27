@@ -1,5 +1,11 @@
 // Панель «Дом»: одна страница для планшета на стене и телефона.
 // Состояние приходит по WebSocket от хаба, команды уходят REST-запросами.
+//
+// Управление — как пульт, минимум текста:
+//   касание плитки      — включить / выключить (шторы — открыть / закрыть, замок — открыть по PIN);
+//   свайп по плитке ⟷   — яркость, положение штор, температура;
+//   долгое нажатие      — редкие настройки (цвет ленты, режим кондиционера, камера на весь экран).
+// Датчики молчат, пока всё в порядке, и появляются в комнате только с проблемой.
 
 const $ = (id) => document.getElementById(id);
 
@@ -15,7 +21,6 @@ const ICONS = {
   leak: '<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/>',
   smoke: '<path d="M4 14h16M6 18h12M8 10c0-2 2-2 2-4M12 10c0-2 2-2 2-4M16 10c0-2 2-2 2-4"/>',
   siren: '<path d="M7 18v-6a5 5 0 0 1 10 0v6M5 21h14M12 3v2M4 7l1.5 1M20 7l-1.5 1"/>',
-  shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/>',
   leave: '<path d="M10 17l5-5-5-5M15 12H3M14 3h5a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-5"/>',
   home: '<path d="M3 11l9-7 9 7v10H3zM9 21v-6h6v6"/>',
   night: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
@@ -28,16 +33,24 @@ const ICONS = {
   unlock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/>',
   camera: '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3"/>',
   doorbell: '<rect x="7" y="3" width="10" height="18" rx="3"/><circle cx="12" cy="9" r="2"/><circle cx="12" cy="16" r="1.5"/>',
-  presence: '<circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/>',
   gas: '<path d="M12 3c2 3 5 5 5 9a5 5 0 0 1-10 0c0-2 1-3 2-4 0 2 1 3 2 3 0-3 0-5 1-8z"/>',
   air: '<path d="M3 8h11a3 3 0 1 0-3-3M3 12h15a3 3 0 1 1-3 3M3 16h8"/>',
-  button: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/>',
+  battery: '<rect x="3" y="7" width="16" height="10" rx="2"/><path d="M21 11v2M6 10v4"/>',
+  offline: '<path d="M2 8.8a15 15 0 0 1 20 0M5 12.6a10 10 0 0 1 14 0M8.5 16.3a5 5 0 0 1 7 0M12 20h.01M3 3l18 18"/>',
+  journal: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  phone: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',
+  phones: '<rect x="3" y="4" width="9" height="16" rx="2"/><rect x="14" y="7" width="7" height="13" rx="2"/>',
+  install: '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',
+  exit: '<path d="M14 3h5a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-5M10 17l-5-5 5-5M5 12h12"/>',
+  swap: '<path d="M7 7h13l-4-4M17 17H4l4 4"/>',
 };
-const icon = (name, size = 20) =>
+const icon = (name, size = 22) =>
   `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${ICONS[name] ?? ''}</svg>`;
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const deg = (v) => (v == null ? '—' : `${Number(v).toFixed(1).replace('.', ',')}°`);
+const deg = (v) => (v == null ? '—' : `${String(Math.round(v * 2) / 2).replace('.', ',')}°`);
+const buzz = () => navigator.vibrate?.(8);
 
 const S = {
   house: { name: 'Дом', rooms: [] },
@@ -47,7 +60,6 @@ const S = {
   scenes: [],
   log: [],
   clockSkew: 0, // сервер - клиент, чтобы отсчёты совпадали с хабом
-  view: 'home',
 };
 
 // ---------- связь с хабом ----------
@@ -85,7 +97,6 @@ function connect() {
     } else if (type === 'log') {
       S.log.unshift(data);
       S.log.length = Math.min(S.log.length, 200);
-      if (S.view === 'log') renderLog();
     }
   };
 }
@@ -111,24 +122,26 @@ const command = (id, cmd) => api(`/devices/${id}`, cmd).catch((e) => toast(e.mes
 
 function renderAll() {
   document.title = S.house.name;
+  $('home-name').textContent = S.house.name;
   renderScenes();
   renderRooms();
   renderGuard();
   renderAlerts();
-  if (S.view === 'log') renderLog();
 }
+
+// Короткие подписи сценариев: одно слово под иконкой.
+const SCENE_SHORT = { leave: 'Ушёл', home: 'Дома', night: 'Ночь', morning: 'Утро' };
 
 function renderScenes() {
   $('scenes').innerHTML = S.scenes
-    .map((s) => `<button class="scene" data-scene="${s.id}">${icon(s.id, 22)}<span>${esc(s.name)}</span></button>`)
+    .map((s) => `<button class="scene" data-scene="${s.id}" aria-label="${esc(s.name)}"><span class="scene-dot">${icon(s.id, 24)}</span><span>${esc(SCENE_SHORT[s.id] ?? s.name)}</span></button>`)
     .join('');
 }
 
-const CONTROLS = ['light', 'led', 'switch', 'plug', 'thermostat', 'ac', 'curtain', 'valve', 'lock', 'gate'];
-const MEDIA = ['camera', 'doorbell'];
-const SENSORS = ['presence', 'motion', 'contact', 'air', 'leak', 'smoke', 'gas', 'siren', 'button'];
+const TILES = ['camera', 'doorbell', 'light', 'led', 'switch', 'plug', 'curtain', 'thermostat', 'ac', 'valve', 'lock', 'gate'];
+const ADJUSTABLE = { led: true, curtain: true, thermostat: true, ac: true };
 
-// Пока палец на ползунке — не перерисовываем, иначе ползунок «вырвется» из-под пальца.
+// Пока палец на плитке — не перерисовываем, иначе плитка «вырвется» из-под пальца.
 let holding = false;
 let roomsDirty = false;
 function scheduleRooms() {
@@ -143,18 +156,18 @@ function renderRooms() {
   $('rooms').innerHTML = rooms
     .map((room) => {
       const list = all.filter((d) => d.room === room.id);
-      if (!list.length) return '';
-      const of = (kinds) => list.filter((d) => kinds.includes(d.kind)).sort((a, b) => kinds.indexOf(a.kind) - kinds.indexOf(b.kind));
-      const sensors = of(SENSORS);
+      const tiles = list.filter((d) => TILES.includes(d.kind)).sort((a, b) => TILES.indexOf(a.kind) - TILES.indexOf(b.kind));
+      const issues = list.map(issue).filter(Boolean);
+      if (!tiles.length && !issues.length) return '';
+      const here = list.some((d) => d.kind === 'presence' && d.state.presence);
       return `
         <article class="room">
           <div class="room-head">
-            <div class="room-name">${esc(room.name)}${list.some((d) => d.kind === 'presence' && d.state.presence) ? '<span class="here" title="В комнате кто-то есть"></span>' : ''}</div>
-            <div class="room-climate">${roomClimate(list)}</div>
+            <span class="room-name">${esc(room.name)}${here ? '<i class="here"></i>' : ''}</span>
+            <span class="room-temp">${roomTemp(list)}</span>
           </div>
-          ${of(MEDIA).map(renderMedia).join('')}
-          ${of(CONTROLS).map(renderControl).join('')}
-          ${sensors.length ? `<div class="chips">${sensors.map(renderChip).join('')}</div>` : ''}
+          ${issues.length ? `<div class="issues">${issues.join('')}</div>` : ''}
+          <div class="tiles">${tiles.map(tile).join('')}</div>
         </article>`;
     })
     .join('');
@@ -164,29 +177,257 @@ function renderRooms() {
   }
 }
 
-function roomClimate(list) {
+function roomTemp(list) {
   const sensor = list.find((d) => d.kind === 'climate_sensor');
   const trv = list.find((d) => d.kind === 'thermostat');
   const t = sensor?.state.temperature ?? trv?.state.temperature;
-  if (t == null) return '';
-  const h = sensor?.state.humidity;
-  return `<b>${deg(t)}</b>${h != null ? `${h}%` : ''}`;
+  return t == null ? '' : deg(t);
 }
+
+// Датчики: только если что-то не так. Нормальное состояние не показываем вовсе.
+function issue(d) {
+  const s = d.state;
+  const chip = (cls, ic, text) => `<span class="issue ${cls}">${icon(ic, 16)}${esc(text)}</span>`;
+  if (!d.online && !TILES.includes(d.kind)) return chip('warn', 'offline', `${d.label}: нет связи`);
+  switch (d.kind) {
+    case 'leak': if (s.leak) return chip('bad', 'leak', `${d.label}: вода`); break;
+    case 'smoke': if (s.smoke) return chip('bad', 'smoke', 'Дым'); break;
+    case 'gas': if (s.gas) return chip('bad', 'gas', 'Газ'); break;
+    case 'contact': if (s.open) return chip('warn', 'contact', `${d.label} открыто`); break;
+    case 'siren': if (s.alarm) return chip('bad', 'siren', 'Сирена'); break;
+    case 'air': if (s.co2 > 1000) return chip(s.co2 > 1400 ? 'bad' : 'warn', 'air', 'Душно — проветрить'); break;
+  }
+  if (s.battery != null && s.battery < 15) return chip('warn', 'battery', `${d.label}: батарея ${s.battery}%`);
+  return '';
+}
+
+// ---------- плитки ----------
+
+function tile(d) {
+  const s = d.state;
+  let cls = '';
+  let value = '';
+  let ic = d.kind;
+  let level = null; // 0..1 — заливка у регулируемых плиток
+
+  switch (d.kind) {
+    case 'light':
+    case 'switch':
+      cls = s.on ? 'on' : '';
+      break;
+    case 'plug':
+      cls = s.on ? 'on' : '';
+      if (s.on && s.power > 0) value = `${Math.round(s.power)} Вт`;
+      break;
+    case 'led':
+      cls = s.on ? 'on' : '';
+      if (s.on) { value = `${s.brightness}%`; level = s.brightness / 100; }
+      break;
+    case 'curtain':
+      cls = s.position > 0 ? 'on' : '';
+      value = s.moving ? '…' : s.position > 0 && s.position < 100 ? `${s.position}%` : '';
+      level = s.position / 100;
+      break;
+    case 'thermostat':
+      cls = s.mode === 'off' ? '' : s.heating ? 'on heat' : 'idle';
+      value = s.mode === 'off' ? 'выкл' : deg(s.setpoint);
+      if (s.mode !== 'off') level = (s.setpoint - 5) / 25;
+      break;
+    case 'ac':
+      cls = s.on ? 'on cool' : '';
+      if (s.on) { value = deg(s.setpoint); level = (s.setpoint - 16) / 14; }
+      break;
+    case 'valve':
+      cls = s.open === false ? 'bad' : 'on cool';
+      value = s.open === false ? 'закрыта' : '';
+      break;
+    case 'lock':
+      cls = s.locked ? '' : 'warn';
+      ic = s.locked ? 'lock' : 'unlock';
+      break;
+    case 'gate':
+      cls = s.pulse ? 'on' : '';
+      break;
+    case 'camera':
+    case 'doorbell':
+      return `
+        <button class="tile cam${d.online ? '' : ' offline'}" data-id="${d.id}">
+          <img data-cam="${d.id}" alt="">
+          <span class="tile-label">${icon(d.kind, 16)}${esc(d.label)}</span>
+        </button>`;
+  }
+  const adj = ADJUSTABLE[d.kind] && level != null;
+  return `
+    <button class="tile ${cls}${d.online ? '' : ' offline'}${adj ? ' adj' : ''}" data-id="${d.id}" aria-label="${esc(d.label)}">
+      ${adj ? `<span class="tile-fill" style="--level:${Math.max(0, Math.min(1, level))}"></span>` : ''}
+      <span class="tile-icon">${icon(ic)}</span>
+      <span class="tile-value">${esc(value)}</span>
+      <span class="tile-label">${esc(d.label)}</span>
+    </button>`;
+}
+
+// Касание: главное действие плитки.
+function tap(d) {
+  const s = d.state;
+  buzz();
+  switch (d.kind) {
+    case 'light': case 'switch': case 'plug': case 'led':
+      return command(d.id, { on: !s.on });
+    case 'curtain':
+      if (s.moving) return command(d.id, { action: 'stop' });
+      return command(d.id, { action: s.position > 0 ? 'close' : 'open' });
+    case 'thermostat':
+      return command(d.id, { mode: s.mode === 'off' ? 'heat' : 'off' });
+    case 'ac':
+      return command(d.id, { on: !s.on });
+    case 'valve':
+      return command(d.id, { open: s.open === false });
+    case 'lock':
+      if (!s.locked) return command(d.id, { locked: true });
+      return openSecurity({ onPin: (p) => api(`/devices/${d.id}`, { locked: false, pin: p }), sub: d.label, done: 'Открыто' });
+    case 'gate':
+      return command(d.id, { pulse: true });
+    case 'camera': case 'doorbell':
+      return details(d);
+  }
+}
+
+// Свайп: значение по горизонтали. Полная ширина плитки = весь диапазон (для температуры — 8°).
+const RANGES = {
+  led: { key: 'brightness', min: 1, max: 100, step: 1, span: 100, read: (s) => s.brightness, show: (v) => `${v}%` },
+  curtain: { key: 'position', min: 0, max: 100, step: 5, span: 100, read: (s) => s.position, show: (v) => `${v}%` },
+  thermostat: { key: 'setpoint', min: 5, max: 30, step: 0.5, span: 8, read: (s) => s.setpoint ?? 20, show: deg },
+  ac: { key: 'setpoint', min: 16, max: 30, step: 1, span: 8, read: (s) => s.setpoint ?? 24, show: deg },
+};
+
+// Долгое нажатие: редкие настройки.
+function details(d) {
+  const s = d.state;
+  const room = S.house.rooms.find((r) => r.id === d.room)?.name ?? '';
+  openInfo(d.label, room);
+  const actions = $('sheet-actions');
+  switch (d.kind) {
+    case 'led':
+      actions.innerHTML = `<div class="swatches">${LED_PRESETS.map((p) => `<button data-led="${p.cmd}" style="background:${p.css}" aria-label="${p.name}"></button>`).join('')}</div>`;
+      actions.onclick = (e) => {
+        const c = e.target.closest('[data-led]')?.dataset.led;
+        if (!c) return;
+        const [k, v] = c.split(':');
+        command(d.id, k === 'ct' ? { colorTemp: Number(v) } : { hue: Number(v), saturation: 100 });
+      };
+      break;
+    case 'ac':
+      actions.innerHTML = `<div class="choice">
+        <button data-mode="cool" class="${s.mode === 'cool' ? 'sel' : ''}">Холод</button>
+        <button data-mode="heat" class="${s.mode === 'heat' ? 'sel' : ''}">Тепло</button>
+        <button data-mode="off" class="${!s.on ? 'sel' : ''}">Выкл</button></div>`;
+      actions.onclick = (e) => {
+        const m = e.target.closest('[data-mode]')?.dataset.mode;
+        if (m) { command(d.id, { mode: m }); sheet.close(); }
+      };
+      break;
+    case 'camera':
+    case 'doorbell':
+      actions.innerHTML = `<img class="cam-full" data-cam="${d.id}" src="${frames.get(d.id) ?? ''}" alt="">`;
+      actions.onclick = null;
+      break;
+    case 'thermostat':
+      $('sheet-sub').textContent = `${room} · сейчас ${deg(s.temperature)}`;
+      actions.onclick = null;
+      break;
+    case 'lock':
+      $('sheet-sub').textContent = `${room}${s.battery != null ? ` · батарея ${s.battery}%` : ''}`;
+      actions.onclick = null;
+      break;
+    case 'plug':
+      $('sheet-sub').textContent = `${room}${s.on ? ` · ${Math.round(s.power ?? 0)} Вт` : ''}`;
+      actions.onclick = null;
+      break;
+    default:
+      actions.onclick = null;
+  }
+}
+
+const LED_PRESETS = [
+  { name: 'Тёплый', cmd: 'ct:400', css: '#ffb766' },
+  { name: 'Дневной', cmd: 'ct:270', css: '#fff1dc' },
+  { name: 'Холодный', cmd: 'ct:170', css: '#dfeeff' },
+  { name: 'Янтарь', cmd: 'hue:30', css: '#ff9a1f' },
+  { name: 'Бирюза', cmd: 'hue:180', css: '#2fd3c3' },
+  { name: 'Сирень', cmd: 'hue:280', css: '#a05cff' },
+];
+
+// Жесты на плитках: касание, свайп, долгое нажатие — одним обработчиком.
+let gesture = null;
+$('rooms').addEventListener('pointerdown', (e) => {
+  const el = e.target.closest('.tile');
+  if (!el || e.button > 0) return;
+  const d = S.devices.get(el.dataset.id);
+  if (!d || !d.online) return;
+  const range = RANGES[d.kind];
+  gesture = { el, d, x: e.clientX, y: e.clientY, mode: 'press', range, start: range ? range.read(d.state) : 0, value: null };
+  holding = true;
+  gesture.timer = setTimeout(() => {
+    if (gesture?.mode !== 'press') return;
+    gesture.mode = 'long';
+    buzz();
+    details(d);
+  }, 520);
+});
+
+window.addEventListener('pointermove', (e) => {
+  if (!gesture) return;
+  const dx = e.clientX - gesture.x;
+  const dy = e.clientY - gesture.y;
+  if (gesture.mode === 'press') {
+    if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) return endGesture(); // это прокрутка страницы
+    if (Math.abs(dx) > 10 && gesture.range && gesture.d.state.on !== false) {
+      clearTimeout(gesture.timer);
+      gesture.mode = 'drag';
+      gesture.el.classList.add('dragging');
+      try { gesture.el.setPointerCapture(e.pointerId); } catch {}
+    }
+  }
+  if (gesture.mode !== 'drag') return;
+  const r = gesture.range;
+  const width = gesture.el.getBoundingClientRect().width;
+  let v = gesture.start + (dx / width) * r.span;
+  v = Math.min(r.max, Math.max(r.min, Math.round(v / r.step) * r.step));
+  if (v !== gesture.value) {
+    gesture.value = v;
+    gesture.el.querySelector('.tile-value').textContent = r.show(v);
+    const fill = gesture.el.querySelector('.tile-fill');
+    if (fill) fill.style.setProperty('--level', (v - r.min) / (r.max - r.min));
+  }
+});
+
+window.addEventListener('pointerup', () => {
+  if (!gesture) return;
+  const g = gesture;
+  if (g.mode === 'press') tap(g.d);
+  if (g.mode === 'drag' && g.value != null && g.value !== g.start) {
+    buzz();
+    command(g.d.id, { [g.range.key]: g.value });
+  }
+  endGesture();
+});
+window.addEventListener('pointercancel', endGesture);
+
+function endGesture() {
+  if (!gesture) return;
+  clearTimeout(gesture.timer);
+  gesture.el.classList.remove('dragging');
+  gesture = null;
+  holding = false;
+  if (roomsDirty) setTimeout(renderRooms, 250);
+}
+// Долгое нажатие не должно открывать системное меню.
+$('rooms').addEventListener('contextmenu', (e) => { if (e.target.closest('.tile')) e.preventDefault(); });
 
 // ---------- камеры: кадр раз в 3 секунды, без мерцания при перерисовке ----------
 
 const frames = new Map(); // id камеры -> objectURL последнего кадра
-
-function renderMedia(d) {
-  const sub = d.kind === 'doorbell'
-    ? d.state.lastRing ? `Звонили в ${time(d.state.lastRing)}` : 'Звонков не было'
-    : d.state.motion ? 'Движение в кадре' : 'В эфире';
-  return `
-    <figure class="cam${d.online ? '' : ' offline'}">
-      <img data-cam="${d.id}" alt="${esc(d.label)}">
-      <figcaption>${icon(d.kind, 16)}<span>${esc(d.label)}</span><small>${sub}</small></figcaption>
-    </figure>`;
-}
+const MEDIA = ['camera', 'doorbell'];
 
 async function refreshFrames() {
   const cams = [...S.devices.values()].filter((d) => MEDIA.includes(d.kind) && d.online);
@@ -204,123 +445,16 @@ async function refreshFrames() {
     }
   }));
 }
-setInterval(() => { if (!document.hidden && S.view === 'home') refreshFrames(); }, 3000);
+setInterval(() => { if (!document.hidden) refreshFrames(); }, 3000);
 
-function renderControl(d) {
-  const s = d.state;
-  const off = d.online ? '' : ' offline';
-  const row = (cls, sub, right) => `
-    <div class="row ${cls}${off}" data-id="${d.id}">
-      <div class="row-icon">${icon(d.kind)}</div>
-      <div class="row-text"><div class="row-label">${esc(d.label)}</div><div class="row-sub">${sub}</div></div>
-      ${right}
-    </div>`;
-  const sw = (on) => `<button class="switch" role="switch" aria-checked="${on}" data-cmd="toggle" aria-label="${esc(d.label)}"></button>`;
-
-  switch (d.kind) {
-    case 'light':
-      return row(s.on ? 'on' : '', s.on ? 'Включён' : 'Выключен', sw(s.on));
-    case 'switch':
-      return row(s.on ? 'on' : '', s.on ? 'Работает' : 'Выключен', sw(s.on));
-    case 'led': {
-      const tone = s.mode === 'color' ? 'цвет' : s.colorTemp >= 330 ? 'тёплый' : s.colorTemp <= 220 ? 'холодный' : 'дневной';
-      const ctl = s.on ? `
-        <div class="led-ctl" data-id="${d.id}">
-          <input type="range" min="1" max="100" value="${s.brightness}" aria-label="Яркость">
-          <div class="swatches">
-            ${LED_PRESETS.map((p) => `<button data-cmd="${p.cmd}" style="background:${p.css}" aria-label="${p.name}" title="${p.name}"></button>`).join('')}
-          </div>
-        </div>` : '';
-      return row(s.on ? 'on' : '', s.on ? `${s.brightness}% · ${tone}` : 'Выключена', sw(s.on)) + ctl;
-    }
-    case 'valve': {
-      const sub = s.open === true ? 'Открыта' : s.open === false ? 'Перекрыта' : 'Нет данных';
-      return row(s.open === false ? 'bad' : 'on cool', sub, `
-        <div class="seg">
-          ${s.open === false ? '<button data-cmd="water-open">Открыть</button>' : '<button data-cmd="water-close">Перекрыть</button>'}
-        </div>`);
-    }
-    case 'lock': {
-      const sub = `${s.locked ? 'Закрыт' : 'Открыт'}${s.battery != null ? ` · батарея ${s.battery}%` : ''}`;
-      return row(s.locked ? 'on' : 'warn', sub, s.locked
-        ? '<button class="pill-btn" data-cmd="unlock">Открыть</button>'
-        : '<button class="pill-btn" data-cmd="lock">Закрыть</button>').replace(icon('lock'), icon(s.locked ? 'lock' : 'unlock'));
-    }
-    case 'plug':
-      return row(s.on ? 'on' : '', s.on ? `${Math.round(s.power ?? 0)} Вт` : 'Выключена', sw(s.on));
-    case 'thermostat': {
-      const sub = s.mode === 'off' ? 'Выключен' : `Сейчас ${deg(s.temperature)}${s.heating ? ' · греет' : ''}`;
-      return row(s.heating ? 'on heat' : '', sub, stepper(s.setpoint, 'setpoint'));
-    }
-    case 'ac': {
-      const sub = s.on ? `${s.mode === 'heat' ? 'Обогрев' : 'Охлаждение'} · ${deg(s.setpoint)}` : 'Выключен';
-      return row(s.on ? 'on cool' : '', sub, `${s.on ? stepper(s.setpoint, 'setpoint') : ''}${sw(s.on)}`);
-    }
-    case 'curtain': {
-      const sub = s.moving ? `${s.moving === 'opening' ? 'Открываются' : 'Закрываются'}… ${s.position}%`
-        : s.position === 0 ? 'Закрыты' : s.position === 100 ? 'Открыты' : `Открыты на ${s.position}%`;
-      return row(s.position > 0 ? 'on' : '', sub, `
-        <div class="seg">
-          <button data-cmd="open">Открыть</button>
-          ${s.moving ? '<button data-cmd="stop">Стоп</button>' : ''}
-          <button data-cmd="close">Закрыть</button>
-        </div>`);
-    }
-    case 'gate':
-      return row(s.pulse ? 'on' : '', 'Открыть или закрыть', '<button class="pill-btn" data-cmd="pulse">Нажать</button>');
-  }
-  return '';
-}
-
-const LED_PRESETS = [
-  { name: 'Тёплый', cmd: 'ct:400', css: '#ffb766' },
-  { name: 'Дневной', cmd: 'ct:270', css: '#fff1dc' },
-  { name: 'Холодный', cmd: 'ct:170', css: '#dfeeff' },
-  { name: 'Янтарь', cmd: 'hue:30', css: '#ff9a1f' },
-  { name: 'Бирюза', cmd: 'hue:180', css: '#2fd3c3' },
-  { name: 'Сирень', cmd: 'hue:280', css: '#a05cff' },
-];
-
-function stepper(value, key) {
-  return `<div class="stepper"><button data-cmd="${key}-" aria-label="Меньше">−</button><output>${deg(value)}</output><button data-cmd="${key}+" aria-label="Больше">+</button></div>`;
-}
-
-function renderChip(d) {
-  const s = d.state;
-  let text, cls = '';
-  if (!d.online) return `<span class="chip warn">${icon(d.kind)}${esc(d.label)} · не в сети</span>`;
-  switch (d.kind) {
-    case 'contact': text = s.open ? 'открыто' : 'закрыто'; if (s.open) cls = 'warn'; break;
-    case 'motion': text = s.motion ? 'есть' : 'нет'; if (s.motion) cls = 'warn'; break;
-    case 'presence': text = s.presence ? 'кто-то есть' : 'никого'; if (s.presence) cls = 'on'; break;
-    case 'leak': text = s.leak ? 'вода!' : 'сухо'; if (s.leak) cls = 'bad'; break;
-    case 'smoke': text = s.smoke ? 'дым!' : 'норма'; if (s.smoke) cls = 'bad'; break;
-    case 'gas': text = s.gas ? 'утечка!' : 'норма'; if (s.gas) cls = 'bad'; break;
-    case 'siren': text = s.alarm ? 'воет' : 'тихо'; if (s.alarm) cls = 'bad'; break;
-    case 'air':
-      // CO₂: до 1000 — свежо, 1000–1400 — пора проветрить, выше — душно.
-      text = s.co2 == null ? '—' : `CO₂ ${s.co2} ppm${s.pm25 != null ? ` · PM2.5 ${s.pm25}` : ''}`;
-      if (s.co2 > 1400) cls = 'bad';
-      else if (s.co2 > 1000) { cls = 'warn'; text += ' · проветрить'; }
-      break;
-    case 'button': text = s.lastActionAt ? `нажата в ${time(s.lastActionAt)}` : 'готова'; break;
-  }
-  if (!cls && s.battery != null && s.battery < 20) { cls = 'warn'; text += ` · батарея ${s.battery}%`; }
-  return `<span class="chip ${cls}">${icon(d.kind)}${esc(d.label)} · ${text}</span>`;
-}
-
-const GUARD_TEXT = {
-  disarmed: () => 'Охрана выключена',
-  arming: () => `Охрана через ${secondsLeft()} с`,
-  armed: () => (S.security.mode === 'night' ? 'Ночная охрана' : 'Под охраной'),
-  entry: () => `Снимите охрану · ${secondsLeft()} с`,
-  alarm: () => 'Тревога',
-};
+// ---------- охрана: щит в шапке ----------
 
 function renderGuard() {
   const st = S.security.status;
   $('guard').dataset.status = st;
-  $('guard-text').textContent = GUARD_TEXT[st]();
+  const left = st === 'arming' || st === 'entry' ? secondsLeft() : '';
+  $('guard-text').textContent = left || '';
+  $('guard').setAttribute('aria-label', { disarmed: 'Охрана выключена', arming: 'Охрана включается', armed: 'Под охраной', entry: 'Снимите охрану', alarm: 'Тревога' }[st]);
   if ((st === 'entry' || st === 'alarm') && (!sheetOpen() || sheetMode !== 'security')) openSecurity();
   if (sheetOpen() && sheetMode === 'security') fillSecurity();
 }
@@ -330,24 +464,46 @@ function secondsLeft() {
   return Math.max(0, Math.ceil((S.security.until - (Date.now() + S.clockSkew)) / 1000));
 }
 
+// ---------- тревоги: смахнуть или нажать — «понятно» ----------
+
 function renderAlerts() {
   $('alerts').innerHTML = S.alerts
     .map((a) => `
-      <div class="alert ${a.level}">
+      <div class="alert ${a.level}" data-ack="${esc(a.id)}">
         ${a.kind === 'doorbell' && a.deviceId
           ? `<img class="alert-cam" data-cam="${esc(a.deviceId)}" src="${frames.get(a.deviceId) ?? ''}" alt="">`
-          : `<div class="alert-icon">${icon('alert', 24)}</div>`}
-        <div class="alert-text"><div class="alert-title">${esc(a.title)}</div><div class="alert-time">${time(a.at)}</div></div>
-        <button data-ack="${esc(a.id)}">Понятно</button>
+          : `<span class="alert-icon">${icon('alert', 22)}</span>`}
+        <span class="alert-title">${esc(a.title)}</span>
+        <span class="alert-time">${time(a.at)}</span>
       </div>`)
     .join('');
 }
 
-function renderLog() {
-  $('log').innerHTML = S.log.length
-    ? S.log.map((e) => `<li><time>${time(e.at)}</time><span class="${e.level}">${esc(e.text)}</span></li>`).join('')
-    : '<li class="log-empty">Пока ничего не происходило</li>';
-}
+let swipe = null;
+$('alerts').addEventListener('pointerdown', (e) => {
+  const el = e.target.closest('.alert');
+  if (el) swipe = { el, x: e.clientX };
+});
+$('alerts').addEventListener('pointermove', (e) => {
+  if (!swipe) return;
+  const dx = e.clientX - swipe.x;
+  swipe.el.style.transform = `translateX(${dx}px)`;
+  swipe.el.style.opacity = String(1 - Math.min(Math.abs(dx) / 240, 0.7));
+});
+window.addEventListener('pointerup', (e) => {
+  if (!swipe) return;
+  const { el, x } = swipe;
+  swipe = null;
+  const moved = Math.abs(e.clientX - x);
+  if (moved > 90 || moved < 6) {
+    el.style.transform = `translateX(${(e.clientX - x) >= 0 ? 110 : -110}%)`;
+    el.style.opacity = '0';
+    api(`/alerts/${encodeURIComponent(el.dataset.ack)}/ack`).catch((err) => toast(err.message));
+  } else {
+    el.style.transform = '';
+    el.style.opacity = '';
+  }
+});
 
 function time(ts) {
   const d = new Date(ts);
@@ -356,92 +512,44 @@ function time(ts) {
   return sameDay ? hm : `${d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })} ${hm}`;
 }
 
-// ---------- действия ----------
-
-$('rooms').addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-cmd]');
-  const row = e.target.closest('[data-id]');
-  if (!btn || !row) return;
-  const d = S.devices.get(row.dataset.id);
-  if (!d) return;
-  const cmd = btn.dataset.cmd;
-  if (cmd === 'toggle') command(d.id, { on: !d.state.on });
-  else if (cmd === 'setpoint+') command(d.id, { setpoint: (d.state.setpoint ?? 20) + 0.5 });
-  else if (cmd === 'setpoint-') command(d.id, { setpoint: (d.state.setpoint ?? 20) - 0.5 });
-  else if (cmd === 'open' || cmd === 'close' || cmd === 'stop') command(d.id, { action: cmd });
-  else if (cmd === 'pulse') command(d.id, { pulse: true }).then(() => toast('Ворота: команда отправлена'));
-  else if (cmd === 'water-open') command(d.id, { open: true });
-  else if (cmd === 'water-close') command(d.id, { open: false });
-  else if (cmd === 'lock') command(d.id, { locked: true });
-  else if (cmd === 'unlock') {
-    openSecurity({ onPin: (p) => api(`/devices/${d.id}`, { locked: false, pin: p }), sub: `Открыть: ${d.label}`, done: 'Замок открыт' });
-  } else if (cmd.startsWith('ct:')) command(d.id, { colorTemp: Number(cmd.slice(3)) });
-  else if (cmd.startsWith('hue:')) command(d.id, { hue: Number(cmd.slice(4)), saturation: 100 });
-});
-
-// Яркость ленты: команда уходит, когда палец отпустил ползунок.
-$('rooms').addEventListener('pointerdown', (e) => { if (e.target.matches('input[type=range]')) holding = true; });
-const release = () => {
-  if (!holding) return;
-  holding = false;
-  if (roomsDirty) setTimeout(renderRooms, 300);
-};
-window.addEventListener('pointerup', release);
-window.addEventListener('pointercancel', release);
-$('rooms').addEventListener('change', (e) => {
-  if (!e.target.matches('input[type=range]')) return;
-  const id = e.target.closest('[data-id]')?.dataset.id;
-  if (id) command(id, { brightness: Number(e.target.value) });
-});
+// ---------- сценарии ----------
 
 $('scenes').addEventListener('click', async (e) => {
   const btn = e.target.closest('[data-scene]');
   if (!btn) return;
   const id = btn.dataset.scene;
-  // «Я дома» при включённой охране — сначала PIN.
+  buzz();
+  // «Дома» при включённой охране — сначала PIN.
   if (id === 'home' && S.security.status !== 'disarmed') {
-    openSecurity({ onPin: (pin) => api('/scenes/home', { pin }) });
+    openSecurity({ onPin: (pin) => api('/scenes/home', { pin }), done: 'С возвращением' });
     return;
   }
   btn.classList.add('busy');
   try {
     await api(`/scenes/${id}`);
-    toast(`«${btn.textContent.trim()}» — готово`);
+    toast(`${SCENE_SHORT[id] ?? ''} ✓`);
   } catch (err) {
     toast(err.message);
   } finally {
-    setTimeout(() => btn.classList.remove('busy'), 400);
+    setTimeout(() => btn.classList.remove('busy'), 500);
   }
 });
 
-$('alerts').addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-ack]');
-  if (btn) api(`/alerts/${encodeURIComponent(btn.dataset.ack)}/ack`).catch((err) => toast(err.message));
-});
-
-$('tabs').addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-view]');
-  if (!btn) return;
-  S.view = btn.dataset.view;
-  for (const b of $('tabs').children) b.classList.toggle('active', b === btn);
-  $('view-home').hidden = S.view !== 'home';
-  $('view-log').hidden = S.view !== 'log';
-  if (S.view === 'log') renderLog();
-});
-
-// ---------- окно охраны и PIN ----------
+// ---------- окно (охрана, PIN, детали, меню) ----------
 
 const sheet = $('sheet');
 const sheetOpen = () => sheet.open;
 let sheetMode = 'security'; // security | info
 let pin = '';
 let onPin = null;
-let pinSub = 'Чтобы снять охрану';
+let pinSub = '';
 let pinDone = 'Охрана снята';
 
 $('guard').addEventListener('click', () => openSecurity());
 $('sheet-close').addEventListener('click', () => sheet.close());
 sheet.addEventListener('close', () => { onPin = null; pin = ''; });
+// Тап по затемнению вокруг окна — закрыть.
+sheet.addEventListener('click', (e) => { if (e.target === sheet && S.security.status !== 'entry' && S.security.status !== 'alarm') sheet.close(); });
 
 $('pin-pad').innerHTML = [1, 2, 3, 4, 5, 6, 7, 8, 9, '', 0, '⌫']
   .map((k) => (k === '' ? '<span></span>' : `<button data-key="${k}" class="${k === '⌫' ? 'ghost' : ''}">${k}</button>`))
@@ -476,10 +584,11 @@ function drawPin() {
 function openSecurity(opts = {}) {
   sheetMode = 'security';
   onPin = opts.onPin ?? null;
-  pinSub = opts.sub ?? 'Чтобы снять охрану';
+  pinSub = opts.sub ?? '';
   pinDone = opts.done ?? 'Охрана снята';
   pin = '';
   drawPin();
+  $('sheet-actions').onclick = null;
   fillSecurity();
   if (!sheet.open) sheet.showModal();
 }
@@ -494,14 +603,14 @@ function fillSecurity() {
   };
   sheet.classList.toggle('alarm', status === 'entry' || status === 'alarm');
 
-  if (onPin) return set('Введите PIN', pinSub, '', true);
+  if (onPin) return set('PIN', pinSub, '', true);
   if (status === 'disarmed') {
-    return set('Охрана выключена', 'Выберите режим', `
-      <button class="primary" data-arm="away">Я ухожу — полная охрана</button>
-      <button data-arm="night">Ночь — только двери и окна</button>`, false);
+    return set('Охрана', '', `
+      <button class="primary" data-arm="away">${icon('leave')}Ухожу</button>
+      <button data-arm="night">${icon('night')}На ночь</button>`, false);
   }
-  if (status === 'arming') return set(`Охрана через ${secondsLeft()} с`, 'Выходите и закройте дверь. PIN — отменить', '', true);
-  if (status === 'armed') return set(mode === 'night' ? 'Ночная охрана' : 'Дом под охраной', 'PIN — снять охрану', '', true);
+  if (status === 'arming') return set(`Через ${secondsLeft()} с`, 'PIN — отменить', '', true);
+  if (status === 'armed') return set(mode === 'night' ? 'Ночная охрана' : 'Под охраной', '', '', true);
   if (status === 'entry') return set(`Снимите охрану: ${secondsLeft()} с`, reason ?? '', '', true);
   if (status === 'alarm') return set('Тревога', reason ?? '', '', true);
 }
@@ -522,46 +631,126 @@ function openInfo(title, sub) {
   onPin = null;
   sheet.classList.remove('alarm');
   $('sheet-title').textContent = title;
-  $('sheet-sub').textContent = sub;
+  $('sheet-sub').textContent = sub ?? '';
   $('sheet-actions').innerHTML = '';
+  $('sheet-actions').onclick = null;
   $('pin').hidden = true;
   if (!sheet.open) sheet.showModal();
 }
 
-// ---------- приложение: установка, офлайн, уведомления ----------
+// ---------- меню «⋯»: всё редкое ----------
 
 const standalone = matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches || navigator.standalone === true;
 const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 let installEvent = null;
+let cloud = null; // статус облака у хаба — для пунктов «Подключить телефон» и «Телефоны»
 
-if ('serviceWorker' in navigator && window.isSecureContext) {
-  navigator.serviceWorker.register('sw.js').then(renderNotify).catch((e) => console.warn('sw', e));
+async function openMenu() {
+  openInfo('', '');
+  const items = [];
+  items.push({ id: 'journal', icon: 'journal', label: 'Журнал' });
+  const notify = await notifyState();
+  if (notify) items.push({ id: 'notify', icon: 'bell', label: 'Уведомления', value: notify.label, on: notify.on });
+  try { cloud = await api('/cloud', null, 'GET'); } catch { cloud = null; }
+  if (cloud?.enabled && cloud.connected) {
+    items.push({ id: 'pair', icon: 'phone', label: 'Подключить телефон' });
+    items.push({ id: 'phones', icon: 'phones', label: 'Телефоны' });
+  }
+  if (!standalone && (installEvent || ios)) items.push({ id: 'install', icon: 'install', label: 'На экран «Домой»' });
+  for (const extra of window.DOM_MENU_EXTRA?.() ?? []) items.push(extra);
+
+  $('sheet-actions').innerHTML = `<div class="menu">${items.map((i) => `
+    <button data-item="${i.id}">${icon(i.icon)}<span>${esc(i.label)}</span>${i.value ? `<small class="${i.on ? 'on' : ''}">${esc(i.value)}</small>` : ''}</button>`).join('')}</div>`;
+  $('sheet-actions').onclick = (e) => {
+    const id = e.target.closest('[data-item]')?.dataset.item;
+    if (!id) return;
+    const extra = (window.DOM_MENU_EXTRA?.() ?? []).find((x) => x.id === id);
+    if (extra) {
+      sheet.close();
+      return extra.run();
+    }
+    ({ journal: openJournal, notify: toggleNotify, pair: showPairQr, phones: openPhones, install: install })[id]?.();
+  };
+}
+$('menu').addEventListener('click', openMenu);
+
+function openJournal() {
+  openInfo('Журнал', '');
+  $('sheet-actions').innerHTML = `<ol class="log">${S.log.length
+    ? S.log.slice(0, 80).map((e) => `<li class="${e.level}"><time>${time(e.at)}</time><span>${esc(e.text)}</span></li>`).join('')
+    : '<li class="log-empty">Пока тихо</li>'}</ol>`;
 }
 
-// Chrome/Edge/Android: браузер сам скажет, что приложение можно установить.
+async function showPairQr() {
+  try {
+    const { svg } = await api('/cloud/pair');
+    openInfo('Наведите камеру телефона', 'Потом — Face ID. QR живёт 10 минут.');
+    $('sheet-actions').innerHTML = `<div class="qr">${svg}</div>`;
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+async function openPhones() {
+  openInfo('Телефоны', '');
+  const box = $('sheet-actions');
+  box.innerHTML = '<p class="muted">…</p>';
+  try {
+    const { members } = await api('/cloud/members', null, 'GET');
+    box.innerHTML = members.length
+      ? `<div class="menu">${members.map((m) => `
+          <div class="member">${icon(m.device === 'Компьютер' ? 'install' : 'phone')}
+            <span>${esc(m.device ?? 'Телефон')}<small>${m.role === 'owner' ? 'владелец · ' : ''}${new Date(m.created_at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })}</small></span>
+            <button class="pill-btn" data-remove="${esc(m.user_id)}">Отключить</button>
+          </div>`).join('')}</div>`
+      : '<p class="muted">Пока ни одного</p>';
+    box.onclick = async (e) => {
+      const btn = e.target.closest('[data-remove]');
+      if (!btn) return;
+      if (btn.dataset.confirm !== '1') {
+        btn.dataset.confirm = '1';
+        btn.textContent = 'Точно?';
+        btn.classList.add('danger');
+        return;
+      }
+      try {
+        await api('/cloud/members/remove', { userId: btn.dataset.remove });
+        toast('Отключён');
+        openPhones();
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+  } catch (err) {
+    box.innerHTML = `<p class="muted">${esc(err.message)}</p>`;
+  }
+}
+
+// ---------- установка и уведомления ----------
+
+if ('serviceWorker' in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register('sw.js').catch((e) => console.warn('sw', e));
+}
+
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
   installEvent = e;
-  $('install').hidden = false;
 });
 window.addEventListener('appinstalled', () => {
   installEvent = null;
-  $('install').hidden = true;
-  toast('Приложение установлено');
+  toast('Установлено');
 });
-// iPhone/iPad: кнопки установки в Safari нет — показываем, куда нажать.
-if (ios && !standalone) $('install').hidden = false;
 
-$('install').addEventListener('click', async () => {
+async function install() {
   if (installEvent) {
     installEvent.prompt();
     await installEvent.userChoice;
     installEvent = null;
-    $('install').hidden = true;
+    sheet.close();
     return;
   }
-  openInfo('Установить на iPhone', 'Нажмите «Поделиться» внизу Safari, затем «На экран „Домой“». Уведомления о тревогах на iPhone работают только в установленном приложении.');
-});
+  openInfo('На экран «Домой»', 'Safari → «Поделиться» → «На экран „Домой“».');
+}
 
 async function pushSubscription() {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
@@ -569,50 +758,39 @@ async function pushSubscription() {
   return reg ? reg.pushManager.getSubscription() : null;
 }
 
-async function renderNotify() {
-  const btn = $('notify-btn');
-  const sub = $('notify-sub');
-  const set = (text, button, on = false) => {
-    sub.textContent = text;
-    btn.textContent = button ?? '';
-    btn.hidden = !button;
-    $('notify').classList.toggle('on', on);
-  };
-  if (!window.isSecureContext) return set('Заработают, когда приложение откроется по защищённому адресу (https)');
-  if (ios && !standalone) return set('На iPhone — сначала установите приложение', 'Как?');
-  if (!('PushManager' in window) || !('Notification' in window)) return set('Этот браузер не умеет уведомления');
-  if (Notification.permission === 'denied') return set('Запрещены в настройках браузера для этого сайта');
-  // В демо нет сервера: уведомления показывает сама страница, пока она открыта.
-  const demo = window.DOM_DEMO;
-  if (demo) return demo.subscribed() ? set('Включены — в демо приходят, пока приложение открыто', 'Проверить', true) : set('Протечка, дым, проникновение, звонок в дверь', 'Включить');
-  if (await pushSubscription()) return set('Включены на этом устройстве', 'Проверить', true);
-  set('Протечка, дым, проникновение — даже когда приложение закрыто', 'Включить');
+// Что показать в меню напротив «Уведомления». null — пункт не нужен.
+async function notifyState() {
+  if (!window.isSecureContext || !('Notification' in window)) return null;
+  if (ios && !standalone) return { label: 'после установки', on: false, needInstall: true };
+  if (Notification.permission === 'denied') return { label: 'запрещены', on: false };
+  if (window.DOM_DEMO) return window.DOM_DEMO.subscribed() ? { label: 'вкл', on: true } : { label: 'выкл', on: false };
+  if (!('PushManager' in window)) return null;
+  return (await pushSubscription()) ? { label: 'вкл', on: true } : { label: 'выкл', on: false };
 }
 
-$('notify-btn').addEventListener('click', async () => {
-  const action = $('notify-btn').textContent;
+async function toggleNotify() {
+  const st = await notifyState();
   try {
-    if (action === 'Как?') return $('install').click();
-    if (action === 'Проверить') {
+    if (st?.needInstall) return install();
+    if (st?.on) {
       await api('/push/test');
-      return toast('Отправил проверочное уведомление');
+      return toast('Проверка отправлена');
     }
-    if ((await Notification.requestPermission()) !== 'granted') return renderNotify();
+    if ((await Notification.requestPermission()) !== 'granted') return openMenu();
     if (window.DOM_DEMO) {
       await api('/push/subscribe', { demo: true });
-      toast('Уведомления включены');
-      return renderNotify();
+    } else {
+      const reg = await navigator.serviceWorker.ready;
+      const { key } = await api('/push/key', null, 'GET');
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64url(key) });
+      await api('/push/subscribe', sub.toJSON());
     }
-    const reg = await navigator.serviceWorker.ready;
-    const { key } = await api('/push/key', null, 'GET');
-    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64url(key) });
-    await api('/push/subscribe', sub.toJSON());
     toast('Уведомления включены');
+    openMenu();
   } catch (err) {
     toast(err.message);
   }
-  renderNotify();
-});
+}
 
 function base64url(s) {
   const b = atob((s + '='.repeat((4 - (s.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/'));
@@ -630,14 +808,10 @@ function runSceneFromUrl() {
   document.querySelector(`[data-scene="${CSS.escape(id)}"]`)?.click();
 }
 
-renderNotify();
-
 // ---------- часы, отсчёты, тосты ----------
 
 function tick() {
-  const now = new Date();
-  $('clock').textContent = now.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-  $('date').textContent = now.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+  $('clock').textContent = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
   if (S.security.until) renderGuard();
 }
 setInterval(tick, 1000);
@@ -649,7 +823,7 @@ function toast(text) {
   el.textContent = text;
   el.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (el.hidden = true), 2500);
+  toastTimer = setTimeout(() => (el.hidden = true), 2000);
 }
 
 connect();

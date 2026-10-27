@@ -1,7 +1,7 @@
 // Service worker приложения «Дом»: оболочка открывается без связи с хабом,
 // уведомления о тревогах приходят, даже когда приложение закрыто.
 
-const CACHE = 'dom-shell-v2';
+const CACHE = 'dom-shell-v3';
 const SHELL = [
   './',
   './index.html',
@@ -27,12 +27,14 @@ self.addEventListener('activate', (e) => {
 });
 
 // Оболочка: сначала сеть (чтобы обновления доходили сразу), без сети — из кэша.
+// cache: 'no-cache' — сверяемся с сервером всегда: GitHub Pages отдаёт max-age=600, и без этого
+// телефон до 10 минут открывал бы старую версию даже после обновления.
 // API и WebSocket не трогаем: устаревшее состояние дома хуже, чем честное «нет связи».
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin || url.pathname.includes('/api/') || url.pathname.endsWith('/ws')) return;
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, { cache: 'no-cache' })
       .then((res) => {
         if (res.ok) {
           const copy = res.clone();
